@@ -147,7 +147,9 @@ pub struct Lock {
 pub struct Gamepad {
     #[serde(default = "enabled")]
     pub enable: bool,
-    /// How far a stick has to move, as a fraction of the axis's full range, before it counts.
+    /// How far a stick has to move before it counts, as a fraction of its travel from rest to
+    /// the end of the axis -- not of the axis's whole span, which for a centred stick is twice
+    /// that. Triggers and d-pads rest at one end, so for them the two are the same.
     #[serde(default = "default_deadzone")]
     pub deadzone: f32,
     /// The least time between two reports from the same device.
@@ -215,8 +217,9 @@ fn default_sleep_timeout() -> u64 {
     4
 }
 
-/// A quarter of the axis, which every d-pad and any deliberate stick push clears easily while
-/// a settled analog stick's jitter does not come close.
+/// A quarter of the way over. On a real X-Box One S pad that is 8192 counts against a driver
+/// noise floor (`flat`) of 128, so it clears jitter by a factor of sixty while still being a
+/// nudge rather than a shove. A d-pad's whole range is -1..1, so every press clears it.
 fn default_deadzone() -> f32 {
     0.25
 }

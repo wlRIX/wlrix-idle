@@ -63,7 +63,7 @@ command = "swaylock -f -c 000000"
 # never sees a stick move -- this is what puts that input back.
 [gamepad]
 enable = true
-deadzone = 0.25       # fraction of an axis's full range that counts as a move
+deadzone = 0.25       # how far a stick must move, as a fraction of its travel from rest
 min_interval_ms = 1000
 allow = []            # case-insensitive substrings of the device name; empty means "any gamepad"
 deny = []
@@ -109,6 +109,16 @@ must never leave things worse than not reloading; restart the daemon for that.
 Gamepads are read straight from `/dev/input`, and need no privileges: udev's `70-uaccess.rules` gives the logged-in user
 an ACL on joystick nodes and on nothing else. That also means `wlrix-idle` structurally cannot read a keyboard or a
 mouse, even if its device detection were wrong.
+
+`--list-devices` also prints each controller's axes and how far each has to move to register, which is the other half of
+diagnosing a pad that does not wake the screen:
+
+```
+/dev/input/event258: Microsoft X-Box One S pad -- controller
+    axis 0x0000: -32768..32767 (flat 128), moves by 8192 to count
+    axis 0x0002: 0..1023 (flat 0), moves by 256 to count
+    axis 0x0010: -1..1 (flat 0), moves by 1 to count
+```
 
 Detection is by capability bits — a device counts as a controller if it has gamepad or joystick buttons, and looks like
 neither a keyboard nor a pointer. Deliberately not udev's `ID_INPUT_JOYSTICK`, which is wrong often enough to matter:

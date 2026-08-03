@@ -86,16 +86,30 @@ struct Motion {
     threshold: HashMap<u16, i32>,
 }
 
+/// How far an axis has to move to count, in the units that axis reports.
+///
+/// `deadzone` is a fraction of the distance from the resting point to the end of the axis, not
+/// of the axis's whole span. Those differ by a factor of two for a stick, which rests in the
+/// middle and swings both ways: a quarter of the *span* of a -32768..32767 stick would be half
+/// its travel, so waking the screen would mean shoving the stick halfway over rather than
+/// nudging it. Triggers and hats rest at one end and are unaffected either way.
+///
+/// `flat` is the driver's own idea of the dead zone, and is respected as a floor: a device that
+/// says its center is noisy up to 128 counts knows something the config file does not.
+fn threshold_for(minimum: i32, maximum: i32, flat: i32, deadzone: f32) -> i32 {
+    let span = (maximum - minimum).max(0) as f32;
+    // Symmetric about zero means it rests in the middle, so the travel that matters is half.
+    let travel = if minimum < 0 { span / 2.0 } else { span };
+    let fraction = (travel * deadzone).ceil() as i32;
+    flat.max(fraction).max(1)
+}
+
 impl Motion {
     /// Record what an axis's range is, so its threshold can be a fraction of it rather than a
     /// raw count that means different things on different hardware.
-    ///
-    /// `flat` is the driver's own idea of the dead zone, and is respected as a floor: a device
-    /// that says its center is noisy up to 128 knows something the config file does not.
     fn learn(&mut self, axis: u16, minimum: i32, maximum: i32, flat: i32, deadzone: f32) {
-        let range = (maximum - minimum).max(0) as f32;
-        let fraction = (range * deadzone).ceil() as i32;
-        self.threshold.insert(axis, flat.max(fraction).max(1));
+        self.threshold
+            .insert(axis, threshold_for(minimum, maximum, flat, deadzone));
     }
 
     /// Whether this axis reading is the user doing something.
@@ -110,9 +124,10 @@ impl Motion {
         if (value - baseline).abs() < threshold {
             return false;
         }
-        // Only moved baselines follow the stick. Updating it on every reading would let a slow
-        // drift walk the whole axis a count at a time without ever crossing the threshold, and
-        // then read as a move when it came back.
+        // The baseline follows only the readings that counted, so wandering inside the dead
+        // zone never drags it along. Updating it on every reading would mean measuring the push
+        // that finally crosses the threshold from wherever the noise had left the baseline,
+        // rather than from where the stick actually rests.
         self.baseline.insert(axis, value);
         true
     }
@@ -479,12 +494,39 @@ pub fn list(config: &config::Gamepad) {
                     "controller"
                 };
                 println!("{}: {name} -- {verdict}", path.display());
+                if verdict.starts_with("controller") {
+                    print_axes(&device, config);
+                }
             }
             Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
                 println!("{}: not readable -- not a controller", path.display());
             }
             Err(err) => println!("{}: could not open ({err})", path.display()),
         }
+    }
+}
+
+/// Each axis's range and how far it has to move to count.
+///
+/// The other half of "my controller does not wake the screen": knowing the device was found is
+/// only useful next to knowing what it would take to register. A threshold that reads as an
+/// implausibly large number against the range beside it is the answer, and no amount of
+/// pressing buttons would have revealed it.
+fn print_axes(device: &Device, config: &config::Gamepad) {
+    let Ok(axes) = device.get_absinfo() else {
+        println!("    no axes (buttons only)");
+        return;
+    };
+    for (axis, info) in axes {
+        let threshold = threshold_for(info.minimum(), info.maximum(), info.flat(), config.deadzone);
+        println!(
+            "    axis {:#06x}: {}..{} (flat {}), moves by {} to count",
+            axis.0,
+            info.minimum(),
+            info.maximum(),
+            info.flat(),
+            threshold,
+        );
     }
 }
 
@@ -523,20 +565,52 @@ mod tests {
     fn a_stick_pushed_past_the_deadzone_is_activity() {
         let mut motion = stick();
         motion.is_activity(0, 0);
-        // A quarter of 65535 is about 16384.
-        assert!(motion.is_activity(0, 20000));
+        // A quarter of the *travel* of a -32768..32767 stick is 8192.
+        assert!(motion.is_activity(0, 9000));
     }
 
     #[test]
-    fn slow_drift_never_accumulates_into_a_trigger() {
-        // The baseline follows only moves that counted. If it followed every reading, a stick
-        // creeping one count at a time would walk the whole axis without ever registering --
-        // and then read as a full-scale move the moment it sprang back.
+    fn a_stick_is_measured_against_its_travel_not_its_whole_span() {
+        // A centred stick swings both ways, so its span is twice the distance from rest to the
+        // end. Measuring the deadzone against the span would mean a quarter-deadzone needing
+        // the stick shoved *half way over* to wake the screen. Measured on a real X-Box One S
+        // pad, which reports -32768..32767: 8192, not 16384.
+        assert_eq!(threshold_for(-32768, 32767, 0, 0.25), 8192);
+        // A trigger rests at one end, so its span is its travel and nothing changes: the same
+        // pad reports 0..1023 for a trigger.
+        assert_eq!(threshold_for(0, 1023, 0, 0.25), 256);
+    }
+
+    #[test]
+    fn jitter_around_a_resting_point_never_accumulates_however_long_it_goes_on() {
+        // The baseline follows only moves that counted, so it does not creep. If it followed
+        // every reading instead, a stick wandering inside its dead zone would drag the baseline
+        // with it, and the reading that finally crossed the threshold would be measured from
+        // wherever the wandering had left it rather than from where the stick actually rests.
         let mut motion = stick();
         motion.is_activity(0, 0);
-        for step in 1..2000 {
-            assert!(!motion.is_activity(0, step * 8), "drift must not count");
+        for step in 0..10_000 {
+            // Well inside the 8192 threshold, and never settling.
+            let jitter = (step % 200) - 100;
+            assert!(
+                !motion.is_activity(0, jitter),
+                "{jitter} is noise, not a push"
+            );
         }
+        // And a real push is still measured from rest, not from the last bit of noise.
+        assert!(motion.is_activity(0, 8192));
+    }
+
+    #[test]
+    fn a_deliberate_walk_across_the_axis_does_count() {
+        // The other side of the above, and the reason it is jitter rather than distance that is
+        // filtered: a stick pushed slowly but all the way over is somebody pushing it.
+        let mut motion = stick();
+        motion.is_activity(0, 0);
+        let counted = (1..2000)
+            .filter(|step| motion.is_activity(0, step * 8))
+            .count();
+        assert!(counted > 0, "a 16000-count movement is a movement");
     }
 
     #[test]
