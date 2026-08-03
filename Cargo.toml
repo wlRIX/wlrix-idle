@@ -1,0 +1,62 @@
+[package]
+name = "wlrix-idle"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "wlRIX idle manager — blanks, locks and suspends the session on a timeout, and notices controllers."
+repository = "https://github.com/wlrix/wlrix-idle"
+publish = false
+
+[dependencies]
+# The Wayland client. `wlrix-idle` watches `ext-idle-notify-v1` for its timeouts and drives
+# `zwlr-output-power-management-v1` to switch the monitors off; smithay-client-toolkit supplies
+# the registry and output plumbing around both, neither of which it wraps itself. Same version
+# the desktop and greeter use, so there is one client stack across wlRIX.
+#
+# `default-features = false` drops `xkbcommon`, which is only there for SCTK's keyboard
+# handling. This program never reads a key -- the compositor tells it the session went idle --
+# so linking the system xkbcommon would be a build dependency bought for nothing.
+smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"] }
+wayland-client = "0.31"
+# `ext-idle-notify-v1`, which is staging rather than stable -- hence the feature.
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# `zwlr-output-power-management-v1`: per-output DPMS. There is no `ext-` equivalent, so the wlr
+# protocol is the only way to actually switch a monitor off.
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# The event loop. The Wayland connection, the D-Bus threads' channel, the inotify watch on
+# /dev/input and every controller's fd are all sources on one loop, so nothing polls.
+calloop = "0.13"
+# The config file. TOML is wlRIX's config format throughout.
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+# Signal handlers (SIGHUP to reload, SIGTERM to switch the screens back on before exiting) and
+# the pidfile's O_NOFOLLOW.
+libc = "0.2"
+# `fs::inotify`, for noticing a controller plugged in mid-session. Already in the tree via
+# calloop and smithay-client-toolkit, so it costs nothing new -- the same reason wlrix-desktop
+# uses it to watch the desktop directory.
+rustix = { version = "1", features = ["fs"] }
+# Reading controllers straight from evdev, which is the whole reason this program exists:
+# libinput classifies a gamepad as a joystick and drops it, so the compositor never sees a
+# stick move and its idle timer never resets.
+#
+# `gilrs` was the alternative and owns its own discovery loop with no fd to hand to calloop,
+# plus an SDL button-mapping database we have no use for -- wlrix-idle only needs to know that
+# *something* happened, never which button. Hand-rolling the EVIOCGBIT/EVIOCGABS ioctls was the
+# other, and variable-length capability bitsets are exactly the fiddly C interop worth a
+# dependency. `default-features = false` drops the optional tokio integration; the device fds
+# go on calloop like everything else.
+evdev = { version = "0.13", default-features = false }
+# D-Bus. `wlrix-idle` *owns* org.freedesktop.ScreenSaver and
+# org.freedesktop.PowerManagement.Inhibit so that Firefox, mpv and Steam can say "not now", and
+# talks to logind on the system bus to lock before the machine suspends.
+#
+# The first zbus in wlRIX, and worth being deliberate about. Unlike an argument parser -- which
+# the workspace hand-rolls -- a D-Bus *server* is name ownership, introspection, signal matching
+# and type signatures, and getting any of it subtly wrong means applications silently fail to
+# inhibit. Nobody reports that bug; they just watch the screen blank during a film.
+#
+# The default `async-io` and `blocking-api` features are kept and `tokio` is deliberately not
+# enabled: the blocking API runs on two dedicated threads that report into calloop, the same
+# shape wlrix-greeter uses for greetd, so no async runtime ever touches the main loop.
+zbus = "5"
