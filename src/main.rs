@@ -33,6 +33,8 @@ use std::path::PathBuf;
 #[derive(Default)]
 pub struct Args {
     pub config: Option<PathBuf>,
+    /// Parse a file, say whether it would be accepted, and exit.
+    pub check_config: Option<PathBuf>,
     pub list_devices: bool,
     pub replace: bool,
     pub no_dbus: bool,
@@ -50,6 +52,12 @@ fn parse_args() -> Result<Args, String> {
                         .ok_or_else(|| "--config needs a path".to_string())?,
                 ));
             }
+            "--check-config" => {
+                args.check_config = Some(PathBuf::from(
+                    argv.next()
+                        .ok_or_else(|| "--check-config needs a path".to_string())?,
+                ));
+            }
             "--list-devices" => args.list_devices = true,
             "--replace" => args.replace = true,
             "--no-dbus" => args.no_dbus = true,
@@ -59,6 +67,7 @@ fn parse_args() -> Result<Args, String> {
                      Usage: wlrix-idle [options]\n\n\
                      Options:\n  \
                        --config <path>   config file to use instead of the usual places\n  \
+                       --check-config <path>  say whether that file would be accepted, exit\n  \
                        --list-devices    list input devices, say which count as controllers, exit\n  \
                        --replace         take the D-Bus names from whoever already holds them\n  \
                        --no-dbus         no inhibit interfaces and no before-sleep handling\n  \
@@ -84,6 +93,22 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
+
+    // Before anything is loaded or started: this answers a question about a file rather than
+    // doing anything with it. `wlrix-settings-daemon` runs it against a candidate file before
+    // renaming it into place, so a settings app cannot write an `idle.toml` this program would
+    // refuse -- and with `deny_unknown_fields`, a refused file is not a wrong setting but the
+    // whole config replaced by defaults, which for an idle manager means a session that
+    // silently never blanks.
+    if let Some(path) = &args.check_config {
+        return match config::check(path) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(why) => {
+                eprintln!("{why}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
 
     let loaded = config::load(args.config.as_deref());
 

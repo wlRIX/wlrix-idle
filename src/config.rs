@@ -392,6 +392,26 @@ pub fn load(explicit: Option<&Path>) -> Loaded {
     }
 }
 
+/// Parse a candidate config file, for `--check-config`.
+///
+/// This program's own serde types are the authority on what its config file may contain.
+/// `wlrix-settings-daemon` writes a temporary file and runs this against it before renaming it
+/// into place, so a settings app cannot produce an `idle.toml` this program would refuse --
+/// which matters because `deny_unknown_fields` means one wrong key costs the *whole* file, and
+/// an idle manager that fell back to defaults is one that silently never blanks.
+///
+/// Deliberately not [`load`]: that reports through `warn!` and carries on with defaults, which
+/// is right at startup and exactly wrong here, where the question *is* whether the file is
+/// acceptable. `tidy` is not run either -- clamping is what this program does with a value it
+/// has accepted, not part of accepting it.
+pub fn check(path: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("could not read {}: {err}", path.display()))?;
+    toml::from_str::<Config>(&text)
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
 /// The first file of this name that exists: the user's, then the system's.
 fn find(name: &str) -> Option<PathBuf> {
     config_dirs()
