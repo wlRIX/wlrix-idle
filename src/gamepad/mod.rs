@@ -571,7 +571,7 @@ mod tests {
 
     #[test]
     fn a_stick_is_measured_against_its_travel_not_its_whole_span() {
-        // A centred stick swings both ways, so its span is twice the distance from rest to the
+        // A centered stick swings both ways, so its span is twice the distance from rest to the
         // end. Measuring the deadzone against the span would mean a quarter-deadzone needing
         // the stick shoved *half way over* to wake the screen. Measured on a real X-Box One S
         // pad, which reports -32768..32767: 8192, not 16384.

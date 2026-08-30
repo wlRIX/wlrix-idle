@@ -148,7 +148,7 @@ pub struct Gamepad {
     #[serde(default = "enabled")]
     pub enable: bool,
     /// How far a stick has to move before it counts, as a fraction of its travel from rest to
-    /// the end of the axis -- not of the axis's whole span, which for a centred stick is twice
+    /// the end of the axis -- not of the axis's whole span, which for a centered stick is twice
     /// that. Triggers and d-pads rest at one end, so for them the two are the same.
     #[serde(default = "default_deadzone")]
     pub deadzone: f32,

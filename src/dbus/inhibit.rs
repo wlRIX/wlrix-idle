@@ -162,7 +162,7 @@ mod tests {
             ..Inhibits::default()
         };
         let first = inhibits.add(Kind::ScreenSaver, holder(":1.1"));
-        assert_ne!(first, 0, "zero would collide with an uninitialised field");
+        assert_ne!(first, 0, "zero would collide with an uninitialized field");
 
         let second = inhibits.add(Kind::PowerManagement, holder(":1.2"));
         assert_ne!(first, second, "a live cookie must not be handed out twice");
