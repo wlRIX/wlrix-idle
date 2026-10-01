@@ -10,7 +10,7 @@
 //!
 //! What is used instead is the capability bits, which describe what the device can actually
 //! report. The rules below are deliberately positive-then-negative: something must have a
-//! recognisable gamepad or joystick button, *and* must not look like a keyboard or a pointer.
+//! recognizable gamepad or joystick button, *and* must not look like a keyboard or a pointer.
 //! The negative half exists because plenty of things carry a stray `BTN_*`.
 //!
 //! Everything here is a pure function over [`Caps`] so it can be tested against the devices
