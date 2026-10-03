@@ -10,7 +10,7 @@
 //! blank = true
 //!
 //! [lock]
-//! command = "swaylock -f -c 000000"
+//! command = "wlrix-lock"
 //!
 //! [gamepad]
 //! enable = true

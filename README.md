@@ -57,7 +57,7 @@ command = ""
 timeout_secs = 4      # logind's InhibitDelayMaxSec is 5 by default; stay under it
 
 [lock]
-command = "swaylock -f -c 000000"
+command = "wlrix-lock"   # stays running until unlocked; do not use a locker that forks
 
 # Controllers. libinput treats a gamepad as a joystick and ignores it, so the compositor
 # never sees a stick move -- this is what puts that input back.
