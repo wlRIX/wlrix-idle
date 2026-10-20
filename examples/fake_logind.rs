@@ -85,7 +85,13 @@ impl Manager {
                 return;
             };
             let sleep = |start: bool| {
-                let _ = connection.emit_signal(None::<&str>, PATH, MANAGER, "PrepareForSleep", &(start,));
+                let _ = connection.emit_signal(
+                    None::<&str>,
+                    PATH,
+                    MANAGER,
+                    "PrepareForSleep",
+                    &(start,),
+                );
             };
             sleep(true);
             eprintln!("fake_logind: PrepareForSleep(true); 'sleeping' for two seconds");
@@ -149,7 +155,8 @@ fn main() -> zbus::Result<()> {
                 continue;
             }
         }
-        let changed: HashMap<&str, Value> = HashMap::from([("LidClosed", Value::from(fake.lid_closed))]);
+        let changed: HashMap<&str, Value> =
+            HashMap::from([("LidClosed", Value::from(fake.lid_closed))]);
         drop(fake);
         eprintln!("fake_logind: {line}");
         let invalidated: Vec<&str> = Vec::new();
