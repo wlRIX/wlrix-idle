@@ -15,7 +15,9 @@ replaces the `swayidle` + `wlopm` pairing, and does three things neither of them
 - **Notices a controller.** libinput classifies a gamepad as a joystick and drops it, so the compositor's input path —
   and therefore `ext-idle-notify` — never sees a stick move. This reads controllers directly and puts that input back.
 - **Locks before suspend.** Takes a logind delay inhibitor, so the locker has actually finished before the machine
-  sleeps.
+  sleeps. On by default, with `wlrix-lock`: a laptop must never wake to an unlocked desktop.
+- **Decides what the lid does.** Takes logind's `handle-lid-switch` inhibitor and acts on `[lid]` instead -- per user,
+  without editing `/etc/systemd/logind.conf` -- with separate actions on battery, plugged in, and docked.
 
 ## Build
 
@@ -51,13 +53,20 @@ blank = true                          # switch the monitors off
 # What to do when the machine is about to suspend. A logind delay inhibitor is held while
 # this runs, so it finishes before the machine actually sleeps.
 [before_sleep]
-lock = true
+lock = true           # the default: never wake unlocked
 blank = false
 command = ""
 timeout_secs = 4      # logind's InhibitDelayMaxSec is 5 by default; stay under it
 
 [lock]
-command = "wlrix-lock"   # stays running until unlocked; do not use a locker that forks
+command = "wlrix-lock"   # the default; "" for no locker. Stays running until unlocked; do not use a
+                         # locker that forks
+
+# Closing the lid: suspend, hibernate, lock (lock and blank, stay awake), blank, or nothing.
+[lid]
+on_battery = "suspend"
+on_ac = "suspend"
+docked = "nothing"       # a dock or another monitor; the compositor switches the panel off itself
 
 # Controllers. libinput treats a gamepad as a joystick and ignores it, so the compositor
 # never sees a stick move -- this is what puts that input back.
@@ -72,9 +81,28 @@ devices = []          # explicit paths, bypassing detection entirely
 [dbus]
 screensaver = true       # own org.freedesktop.ScreenSaver
 power_management = true  # own org.freedesktop.PowerManagement.Inhibit
-logind = true            # take the before-sleep delay inhibitor
+logind = true            # take the before-sleep delay inhibitor and the lid
 replace = false          # take the bus names from whoever already holds them
 ```
+
+### The lid
+
+While `wlrix-idle` runs it holds logind's `handle-lid-switch` *block* inhibitor, so logind's own `HandleLidSwitch*`
+settings are set aside and `[lid]` decides. The defaults are logind's: suspend on battery and plugged in, nothing when
+docked. *Docked* is logind's own test -- a docking station, or more than one display connected -- read at the moment the
+lid shuts, as is whether the machine is on external power. When the process exits, crashed or not, the inhibitor's
+descriptor closes and logind is back in charge.
+
+- **suspend** and **hibernate** ask logind, so `[before_sleep]` runs first and the session locks. If logind refuses --
+  hibernation not set up, or polkit saying no -- the session is locked and blanked instead.
+- **lock** locks and switches the screen off, and the machine stays awake: for a download that has to finish.
+- **blank** only switches the screen off.
+
+Opening the lid counts as activity: the screen comes back, and the idle countdowns start again.
+
+With a monitor plugged in and the lid shut, the compositor switches the laptop's panel off by itself and moves its
+windows to the monitors left (`wlrix-compositor/src/lid.rs`); `docked = "nothing"` leaves the rest of the session
+running on them.
 
 Numbers outside a sensible range are clamped rather than refused. Two things are dropped with a warning instead: a
 timeout of zero seconds, which would fire instantly and forever, and a timeout that has no `blank`, no `lock` and no
@@ -87,7 +115,7 @@ timeout of zero seconds, which would fire instantly and forever, and a timeout t
 | `--config <path>` | Use this config file instead of searching the usual places.                   |
 | `--list-devices`  | List the input devices found, say which are treated as controllers, and exit. |
 | `--replace`       | Take `org.freedesktop.ScreenSaver` and friends from whoever holds them.       |
-| `--no-dbus`       | Do not touch D-Bus at all: no inhibit interfaces, no before-sleep handling.   |
+| `--no-dbus`       | Do not touch D-Bus at all: no inhibit interfaces, no before-sleep or lid.     |
 | `-h`, `--help`    | Print usage and exit.                                                         |
 
 ## Reloading

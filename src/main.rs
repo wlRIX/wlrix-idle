@@ -70,7 +70,7 @@ fn parse_args() -> Result<Args, String> {
                        --check-config <path>  say whether that file would be accepted, exit\n  \
                        --list-devices    list input devices, say which count as controllers, exit\n  \
                        --replace         take the D-Bus names from whoever already holds them\n  \
-                       --no-dbus         no inhibit interfaces and no before-sleep handling\n  \
+                       --no-dbus         no inhibit interfaces, no before-sleep or lid handling\n  \
                        -h, --help        this message\n\n\
                      Config: $XDG_CONFIG_HOME/wlrix/idle.toml, else /etc/wlrix/idle.toml\n\
                      Reload: kill -HUP $(cat $XDG_RUNTIME_DIR/wlrix-idle.pid)",

@@ -46,7 +46,7 @@ use wayland_protocols_wlr::output_power_management::v1::client::zwlr_output_powe
 
 use crate::{
     Args, action, config,
-    config::{Config, Timeout},
+    config::{Config, LidAction, Timeout},
     dbus, gamepad, notify, outputs,
     outputs::Control,
     pidfile, signals,
@@ -278,11 +278,54 @@ impl Idle {
             dbus::Event::Lock => self.lock(),
             dbus::Event::BeforeSleep => self.before_sleep(),
             dbus::Event::AfterSleep => self.after_sleep(),
+            dbus::Event::Lid {
+                closed,
+                docked,
+                external_power,
+            } => self.lid(closed, docked, external_power),
+            dbus::Event::SleepRefused { why } => {
+                // Hibernation not set up, or polkit saying no. The lid is shut either way, so the
+                // session is at least locked and dark.
+                warn!("logind would not sleep ({why}); locking and blanking instead");
+                self.lock();
+                outputs::blank(self);
+            }
             dbus::Event::NameUnavailable { name, owner } => {
                 warn!(
                     "{name} is already owned by {owner}; inhibit requests will go there, not here"
                 );
             }
+        }
+    }
+
+    /// The lid opened or shut. Shut does what `[lid]` says for the situation; open is the person
+    /// coming back, the same as touching the keyboard.
+    fn lid(&mut self, closed: bool, docked: bool, external_power: bool) {
+        if !closed {
+            info!("lid opened");
+            self.activity("lid opened");
+            return;
+        }
+        let action = self.config.lid.action(docked, external_power);
+        info!("lid shut (docked {docked}, on external power {external_power}): {action:?}");
+        match action {
+            LidAction::Suspend | LidAction::Hibernate => {
+                let kind = if action == LidAction::Suspend {
+                    dbus::Sleep::Suspend
+                } else {
+                    dbus::Sleep::Hibernate
+                };
+                match &self.dbus {
+                    Some(dbus) => dbus.sleep(kind),
+                    None => warn!("no D-Bus, so the lid cannot suspend"),
+                }
+            }
+            LidAction::Lock => {
+                self.lock();
+                outputs::blank(self);
+            }
+            LidAction::Blank => outputs::blank(self),
+            LidAction::Nothing => {}
         }
     }
 

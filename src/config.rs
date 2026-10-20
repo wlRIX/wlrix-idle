@@ -12,6 +12,11 @@
 //! [lock]
 //! command = "wlrix-lock"
 //!
+//! [lid]
+//! on_battery = "suspend"
+//! on_ac = "suspend"
+//! docked = "nothing"
+//!
 //! [gamepad]
 //! enable = true
 //! ```
@@ -30,11 +35,16 @@
 //! moment -- and pretending otherwise in the config would mean the file and the protocol
 //! disagreeing about what a number means.
 //!
-//! ## Nothing by default
+//! ## Nothing on idle by default -- but locked before sleep
 //!
 //! With no config file, no timeout is configured and nothing ever fires. An idle manager that
 //! invents a screen-blanking policy nobody asked for is worse than one that sits there: the
 //! first is a surprise in the middle of a film, the second is a line in the log.
+//!
+//! Sleep is different. A laptop closed in a bag and opened on a train must not wake to an
+//! unlocked desktop, so `[before_sleep] lock` is on unless turned off, with `wlrix-lock` --
+//! the desktop's own locker -- as the locker unless `[lock] command` names another. And the lid
+//! does what logind would have done: suspend, except while docked.
 
 use std::path::{Path, PathBuf};
 
@@ -61,6 +71,8 @@ pub struct Config {
     pub before_sleep: BeforeSleep,
     #[serde(default)]
     pub lock: Lock,
+    #[serde(default)]
+    pub lid: Lid,
     #[serde(default)]
     pub gamepad: Gamepad,
     #[serde(default)]
@@ -101,7 +113,8 @@ impl Timeout {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BeforeSleep {
-    #[serde(default)]
+    /// Start the locker. On by default; see the module comment.
+    #[serde(default = "enabled")]
     pub lock: bool,
     #[serde(default)]
     pub blank: bool,
@@ -115,7 +128,7 @@ pub struct BeforeSleep {
 impl Default for BeforeSleep {
     fn default() -> Self {
         Self {
-            lock: false,
+            lock: true,
             blank: false,
             command: None,
             timeout_secs: default_sleep_timeout(),
@@ -133,13 +146,93 @@ impl BeforeSleep {
     }
 }
 
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Lock {
-    /// The locker to run. Nothing by default: which locker a session uses is a choice, and
-    /// guessing at one that is not installed would turn `lock = true` into a silent no-op.
-    #[serde(default)]
+    /// The locker to run: `wlrix-lock` unless another is named. An empty string means none,
+    /// for a session that wants nothing to lock at all.
+    #[serde(default = "default_locker")]
     pub command: Option<String>,
+}
+
+impl Default for Lock {
+    fn default() -> Self {
+        Self {
+            command: default_locker(),
+        }
+    }
+}
+
+fn default_locker() -> Option<String> {
+    Some("wlrix-lock".to_owned())
+}
+
+/// What closing the lid does, in three situations.
+///
+/// Acted on only while this daemon holds logind's `handle-lid-switch` inhibitor, which it takes
+/// at startup when `[dbus] logind` is on; while it runs, logind's own `HandleLidSwitch*`
+/// settings are set aside, and they come back the moment it exits. The defaults are logind's
+/// own, so a file without this section changes nothing but who decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lid {
+    #[serde(default = "LidAction::suspend")]
+    pub on_battery: LidAction,
+    #[serde(default = "LidAction::suspend")]
+    pub on_ac: LidAction,
+    /// A dock, or another monitor plugged in -- logind's own test, which counts displays.
+    /// Nothing by default: the laptop is being used as a desktop, and the compositor switches
+    /// its panel off by itself.
+    #[serde(default = "LidAction::nothing")]
+    pub docked: LidAction,
+}
+
+impl Default for Lid {
+    fn default() -> Self {
+        Self {
+            on_battery: LidAction::Suspend,
+            on_ac: LidAction::Suspend,
+            docked: LidAction::Nothing,
+        }
+    }
+}
+
+impl Lid {
+    /// The action for the situation the lid was closed in.
+    pub fn action(&self, docked: bool, external_power: bool) -> LidAction {
+        if docked {
+            self.docked
+        } else if external_power {
+            self.on_ac
+        } else {
+            self.on_battery
+        }
+    }
+}
+
+/// One thing closing the lid can do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LidAction {
+    /// Sleep; `[before_sleep]` runs first, so the session locks.
+    Suspend,
+    /// Save to disk and power off. Where hibernation is not set up, logind refuses and the
+    /// session is locked and blanked instead.
+    Hibernate,
+    /// Lock and switch the screen off, and stay awake.
+    Lock,
+    /// Switch the screen off, and stay awake.
+    Blank,
+    Nothing,
+}
+
+impl LidAction {
+    fn suspend() -> Self {
+        Self::Suspend
+    }
+    fn nothing() -> Self {
+        Self::Nothing
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -266,11 +359,22 @@ impl Config {
         // sorting again at the moment the user is waiting for the screen to come back.
         self.timeouts.sort_by_key(|timeout| timeout.after_secs);
 
+        // An empty command is how a file says "no locker".
+        if self
+            .lock
+            .command
+            .as_deref()
+            .is_some_and(|command| command.trim().is_empty())
+        {
+            self.lock.command = None;
+        }
         if self.timeouts.iter().any(|timeout| timeout.lock) && self.lock.command.is_none() {
             warn!("a timeout asks to lock, but [lock] command is not set; nothing will lock");
         }
-        if self.before_sleep.lock && self.lock.command.is_none() {
-            warn!("[before_sleep] locks, but [lock] command is not set; nothing will lock");
+        // Locking before sleep is on by default, so with the locker turned off it quietly is too
+        // rather than warning on every start about a setting nobody wrote.
+        if self.lock.command.is_none() {
+            self.before_sleep.lock = false;
         }
 
         self.before_sleep.timeout_secs = self.before_sleep.timeout_secs.clamp(1, 20);
@@ -451,11 +555,37 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_file_is_valid_and_does_nothing() {
+    fn an_empty_file_never_blanks_but_locks_before_sleep() {
         let config = parse("");
         assert!(config.timeouts.is_empty());
-        assert!(!config.before_sleep.does_something());
+        assert!(
+            config.before_sleep.lock,
+            "the session must not wake unlocked"
+        );
+        assert_eq!(config.lock.command.as_deref(), Some("wlrix-lock"));
+        assert_eq!(config.lid, Lid::default());
         assert!(config.gamepad.enable, "controllers are watched by default");
+    }
+
+    #[test]
+    fn no_locker_means_nothing_locks_before_sleep() {
+        let config = parse("[lock]\ncommand = \"\"\n");
+        assert_eq!(config.lock.command, None);
+        assert!(!config.before_sleep.does_something());
+    }
+
+    #[test]
+    fn the_lid_action_follows_the_situation() {
+        let lid =
+            parse("[lid]\non_battery = \"hibernate\"\non_ac = \"lock\"\ndocked = \"blank\"\n").lid;
+        assert_eq!(lid.action(false, false), LidAction::Hibernate);
+        assert_eq!(lid.action(false, true), LidAction::Lock);
+        // Docked wins whatever the power: a docked laptop is nearly always plugged in.
+        assert_eq!(lid.action(true, true), LidAction::Blank);
+        let default = Lid::default();
+        assert_eq!(default.action(false, false), LidAction::Suspend);
+        assert_eq!(default.action(true, false), LidAction::Nothing);
+        assert!(toml::from_str::<Config>("[lid]\non_ac = \"shutdown\"\n").is_err());
     }
 
     #[test]
@@ -546,8 +676,13 @@ mod tests {
     }
 
     #[test]
-    fn before_sleep_does_nothing_until_it_is_asked_to() {
-        assert!(!BeforeSleep::default().does_something());
+    fn before_sleep_can_be_told_to_do_nothing() {
+        assert!(BeforeSleep::default().does_something());
+        assert!(
+            !parse("[before_sleep]\nlock = false\n")
+                .before_sleep
+                .does_something()
+        );
         assert!(
             parse("[before_sleep]\nlock = true\n")
                 .before_sleep
