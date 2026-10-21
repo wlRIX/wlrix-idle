@@ -28,26 +28,30 @@ use std::time::Duration;
 
 use calloop::{EventLoop, LoopHandle};
 use smithay_client_toolkit::{
-    delegate_output, delegate_registry,
+    compositor::{CompositorHandler, CompositorState},
+    delegate_compositor, delegate_output, delegate_registry,
     output::{OutputHandler, OutputState},
     reexports::calloop_wayland_source::WaylandSource,
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
+    shell::wlr_layer::LayerShell,
+    shm::Shm,
 };
 use wayland_client::{
     Connection, QueueHandle,
     globals::registry_queue_init,
-    protocol::{wl_output::WlOutput, wl_seat::WlSeat},
+    protocol::{wl_output::WlOutput, wl_seat::WlSeat, wl_surface::WlSurface},
 };
 use wayland_protocols::ext::idle_notify::v1::client::{
     ext_idle_notification_v1::ExtIdleNotificationV1, ext_idle_notifier_v1::ExtIdleNotifierV1,
 };
+use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use wayland_protocols_wlr::output_power_management::v1::client::zwlr_output_power_manager_v1::ZwlrOutputPowerManagerV1;
 
 use crate::{
     Args, action, config,
     config::{Config, LidAction, Timeout},
-    dbus, gamepad, notify, outputs,
+    dbus, dim, gamepad, notify, outputs,
     outputs::Control,
     pidfile, signals,
 };
@@ -74,6 +78,15 @@ pub struct Idle {
     seat: WlSeat,
     /// Outputs we are holding switched off. Empty whenever the screens are on.
     pub controls: Vec<Control>,
+    /// For the dim overlay ([`dim`]); without the optional two, dimming only lowers the
+    /// backlight.
+    pub compositor: Option<CompositorState>,
+    pub shm: Shm,
+    pub layer_shell: Option<LayerShell>,
+    pub viewporter: Option<WpViewporter>,
+    pub dim: dim::Dim,
+    /// UPower's `OnBattery`: which profile is in force.
+    on_battery: bool,
 
     pub config: Config,
     config_path: Option<PathBuf>,
@@ -107,9 +120,8 @@ impl Idle {
     fn rebuild_steps(&mut self) {
         self.steps = self
             .config
-            .timeouts
-            .iter()
-            .cloned()
+            .steps(self.on_battery)
+            .into_iter()
             .map(|timeout| Step {
                 timeout,
                 notification: None,
@@ -157,9 +169,11 @@ impl Idle {
             return;
         }
         let after = step.timeout.after_secs;
-        let (blank, lock, command) = (
+        let (dim, blank, lock, suspend, command) = (
+            step.timeout.dim,
             step.timeout.blank,
             step.timeout.lock,
+            step.timeout.suspend,
             step.timeout.command.clone(),
         );
         self.steps[index].fired = true;
@@ -168,11 +182,21 @@ impl Idle {
         // Lock before blank, deliberately. The locker has to be up and covering the screen
         // before the monitors go dark, or a screen that comes back early -- a stray input
         // event, a monitor that renegotiates its link -- shows the session behind it.
+        if dim {
+            dim::dim(self);
+        }
         if lock {
             self.lock();
         }
         if blank {
             outputs::blank(self);
+        }
+        if suspend {
+            // `[before_sleep]` runs on the way down, so the session locks first.
+            match &self.dbus {
+                Some(dbus) => dbus.sleep(dbus::Sleep::Suspend),
+                None => warn!("no D-Bus, so the session cannot suspend"),
+            }
         }
         if let Some(command) = command
             && let Some(child) = action::spawn(&command)
@@ -196,7 +220,7 @@ impl Idle {
     /// Does not touch the notifications: which of the four callers needs the countdowns
     /// restarted differs, so that is the caller's business.
     pub fn unwind(&mut self, why: &str) {
-        let anything = self.blanked || self.steps.iter().any(|step| step.fired);
+        let anything = self.blanked || self.dim.active || self.steps.iter().any(|step| step.fired);
         if !anything {
             return;
         }
@@ -205,6 +229,7 @@ impl Idle {
         // First, and before any command runs. The screen coming back is what the user is
         // standing there waiting for; a slow `sh -c` must not be in front of it.
         outputs::unblank(self);
+        dim::undim(self);
 
         // Deepest first: the last thing that happened is the first thing undone.
         let resumes: Vec<String> = self
@@ -283,6 +308,7 @@ impl Idle {
                 docked,
                 external_power,
             } => self.lid(closed, docked, external_power),
+            dbus::Event::OnBattery(on_battery) => self.set_on_battery(on_battery),
             dbus::Event::SleepRefused { why } => {
                 // Hibernation not set up, or polkit saying no. The lid is shut either way, so the
                 // session is at least locked and dark.
@@ -329,6 +355,21 @@ impl Idle {
         }
     }
 
+    /// The power source changed, or was read for the first time: switch profiles.
+    ///
+    /// Pulling the plug or plugging in is somebody at the machine, so it counts as activity:
+    /// every countdown starts again, under the new profile.
+    fn set_on_battery(&mut self, on_battery: bool) {
+        if on_battery == self.on_battery {
+            return;
+        }
+        self.on_battery = on_battery;
+        info!("{}", self.config.summary(on_battery));
+        self.unwind("power source changed");
+        self.rebuild_steps();
+        self.arm_all();
+    }
+
     /// The machine is about to suspend, and logind is waiting on us.
     fn before_sleep(&mut self) {
         info!("about to sleep");
@@ -362,6 +403,13 @@ impl Idle {
     /// leave them doing.
     fn after_sleep(&mut self) {
         info!("awake from sleep; counting again");
+        // A suspend that fired has been done, and must be able to happen again: a laptop woken
+        // in a bag by a passing bump goes back to sleep after the same wait if nobody is there.
+        for step in &mut self.steps {
+            if step.timeout.suspend {
+                step.fired = false;
+            }
+        }
         self.arm_all();
     }
 
@@ -384,7 +432,7 @@ impl Idle {
         let gamepad_changed = loaded.config.gamepad != self.config.gamepad;
         let dbus_changed = loaded.config.dbus != self.config.dbus;
         self.config = loaded.config;
-        info!("{}", self.config.summary());
+        info!("{}", self.config.summary(self.on_battery));
 
         self.rebuild_steps();
         self.arm_all();
@@ -448,6 +496,20 @@ pub fn run(config: Config, args: &Args) -> Result<(), String> {
         }
     };
 
+    // The dim overlay's needs. Shared memory every compositor has; the rest degrade to
+    // "dimming only lowers the backlight".
+    let shm = Shm::bind(&globals, &qh).map_err(|err| format!("no wl_shm ({err})"))?;
+    let compositor = CompositorState::bind(&globals, &qh)
+        .map_err(|err| warn!("no wl_compositor ({err}); dimming only lowers the backlight"))
+        .ok();
+    let layer_shell = LayerShell::bind(&globals, &qh)
+        .map_err(|err| warn!("no layer shell ({err}); dimming only lowers the backlight"))
+        .ok();
+    let viewporter = registry_state
+        .bind_one::<WpViewporter, _, _>(&qh, 1..=1, ())
+        .map_err(|err| warn!("no viewporter ({err}); dimming only lowers the backlight"))
+        .ok();
+
     let mut event_loop: EventLoop<'static, Idle> =
         EventLoop::try_new().map_err(|err| format!("could not create the event loop: {err}"))?;
     let loop_handle = event_loop.handle();
@@ -462,6 +524,12 @@ pub fn run(config: Config, args: &Args) -> Result<(), String> {
         power_manager,
         seat,
         controls: Vec::new(),
+        compositor,
+        shm,
+        layer_shell,
+        viewporter,
+        dim: dim::Dim::default(),
+        on_battery: false,
         config,
         config_path: args.config.clone(),
         steps: Vec::new(),
@@ -548,6 +616,7 @@ impl OutputHandler for Idle {
     }
 
     fn new_output(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, output: WlOutput) {
+        dim::dim_new_output(self, output.clone());
         outputs::blank_new_output(self, output);
     }
 
@@ -555,6 +624,44 @@ impl OutputHandler for Idle {
 
     fn output_destroyed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, output: WlOutput) {
         outputs::forget_output(self, &output);
+        dim::forget_output(self, &output);
+    }
+}
+
+/// Only for the dim overlay's surfaces, which draw one pixel whatever the scale or transform.
+impl CompositorHandler for Idle {
+    fn scale_factor_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlSurface,
+        _: i32,
+    ) {
+    }
+    fn transform_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlSurface,
+        _: wayland_client::protocol::wl_output::Transform,
+    ) {
+    }
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlSurface, _: u32) {}
+    fn surface_enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlSurface,
+        _: &WlOutput,
+    ) {
+    }
+    fn surface_leave(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlSurface,
+        _: &WlOutput,
+    ) {
     }
 }
 
@@ -567,4 +674,5 @@ impl ProvidesRegistryState for Idle {
 
 wayland_client::delegate_noop!(Idle: ignore WlSeat);
 delegate_output!(Idle);
+delegate_compositor!(Idle);
 delegate_registry!(Idle);

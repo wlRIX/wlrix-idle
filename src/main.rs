@@ -16,8 +16,10 @@
 mod log;
 
 mod action;
+mod backlight;
 mod config;
 mod dbus;
+mod dim;
 mod gamepad;
 mod idle;
 mod notify;
@@ -120,7 +122,12 @@ fn main() -> std::process::ExitCode {
     }
 
     info!("config: {}", loaded.source.describe());
-    info!("{}", loaded.config.summary());
+    // Which profile is in force is only known once UPower has answered; both are said here, and
+    // the one that applies again when it does.
+    info!("{}", loaded.config.summary(false));
+    if loaded.config.on_battery.is_some() {
+        info!("{}", loaded.config.summary(true));
+    }
 
     match idle::run(loaded.config, &args) {
         Ok(()) => std::process::ExitCode::SUCCESS,

@@ -32,23 +32,34 @@ Read from `$XDG_CONFIG_HOME/wlrix/idle.toml` (or `~/.config/wlrix/idle.toml`), f
 The first file found is used whole rather than merged, so your own file is all of what you get. Unknown keys are an
 error: a silently ignored typo in a config file is a bad afternoon.
 
-Without a config file nothing happens on a timeout — an idle manager that invents a screen-blanking policy nobody asked
-for is worse than one that sits there.
+Without a config file nothing happens on idle — an idle manager that invents a screen-blanking policy nobody asked
+for is worse than one that sits there. Power Settings (`wlrix-settings-power`) has a When Idle group that sets the two
+profiles.
 
 ```toml
-# Each [[timeout]] is an independent countdown from the last activity, not a stage in a
-# sequence. 600 and 900 below mean "dim at ten minutes, lock and blank at fifteen", both
-# measured from the same moment.
+# Two profiles: plugged in (and desktops, which always are), and on battery, picked by UPower's
+# OnBattery and switched as the plug is pulled or put back. 0 is never. Without [on_battery],
+# the plugged-in profile applies on battery too.
+[plugged_in]
+dim_after_secs = 600          # fade the screens dark; on a laptop, the backlight to a third
+screen_off_after_secs = 900   # switch every monitor off...
+lock = true                   # ...and lock as they go
+suspend_after_secs = 0        # never sleep
 
-[[timeout]]
-after_secs = 600
-command = "wlrix-osd --dim"           # run when the countdown ends
-resume_command = "wlrix-osd --undim"  # run when the user comes back
+[on_battery]
+dim_after_secs = 180
+screen_off_after_secs = 300
+lock = true
+suspend_after_secs = 600
 
+# Anything else, as its own countdown from the last activity -- run under both profiles. Each
+# [[timeout]] is independent, not a stage in a sequence: two at 600 and 900 both count from the
+# same moment.
 [[timeout]]
-after_secs = 900
-lock = true                           # run [lock] command, if it is not already running
-blank = true                          # switch the monitors off
+after_secs = 1200
+command = "notify-send 'Still there?'"   # run when the countdown ends
+resume_command = "true"                  # run when the user comes back
+# Also: dim, blank, lock and suspend, as booleans, like the profiles' actions.
 
 # What to do when the machine is about to suspend. A logind delay inhibitor is held while
 # this runs, so it finishes before the machine actually sleeps.
@@ -84,6 +95,22 @@ power_management = true  # own org.freedesktop.PowerManagement.Inhibit
 logind = true            # take the before-sleep delay inhibitor and the lid
 replace = false          # take the bus names from whoever already holds them
 ```
+
+### Profiles, dimming and sleep
+
+**Which profile** is UPower's `OnBattery`, read at startup and watched; a desktop, or a machine with no UPower, is
+plugged in. Pulling the plug or putting it back counts as activity: whatever has fired is undone, and every countdown
+starts again under the other profile. A dim that would come at or after the screen-off or sleep time is left out.
+
+**Dimming** is a `wlr-layer-shell` overlay on every monitor: one black pixel with some alpha, stretched by
+`wp_viewporter`, faded in over about a second, with an empty input region so nothing is clicked through it. It works on
+any monitor and does not touch the gamma ramp a night-light tool may hold. On a machine with a panel backlight it also
+takes the backlight to a third through logind (`Session.SetBrightness`, as `wlrix-osd`'s keys do), and puts it back on
+the next input -- unless the brightness keys moved it meanwhile. Undimming is instant.
+
+**Sleep** asks logind to suspend; `[before_sleep]` locks on the way down. Woken with nobody there -- a bump in a bag --
+it sleeps again after the same wait. An application inhibiting the screensaver (a video playing) holds sleep off as it
+holds off the rest.
 
 ### The lid
 

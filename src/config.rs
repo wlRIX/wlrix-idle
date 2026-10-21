@@ -4,10 +4,17 @@
 //! ```toml
 //! # ~/.config/wlrix/idle.toml
 //!
-//! [[timeout]]
-//! after_secs = 900
+//! [plugged_in]                  # and desktops, which are always plugged in
+//! dim_after_secs = 600
+//! screen_off_after_secs = 900
+//! lock = true                   # lock as the screen turns off
+//! suspend_after_secs = 0        # never
+//!
+//! [on_battery]
+//! dim_after_secs = 180
+//! screen_off_after_secs = 300
 //! lock = true
-//! blank = true
+//! suspend_after_secs = 600
 //!
 //! [lock]
 //! command = "wlrix-lock"
@@ -25,6 +32,18 @@
 //! outright rather than merging, so what a user sees in their own file is the whole of what
 //! they get. Unknown keys are an error, for the same reason as everywhere else in wlRIX: a
 //! silently ignored typo in a config file is a bad afternoon.
+//!
+//! ## Two profiles
+//!
+//! `[plugged_in]` is what happens on mains power, which a desktop always is; `[on_battery]` is a
+//! laptop running on its battery, as UPower says (`OnBattery`). Without an `[on_battery]` section
+//! the plugged-in profile applies on battery too. Switching between them -- pulling the plug,
+//! say -- starts every countdown again from that moment, under the new profile.
+//!
+//! A profile is the four things everybody sets, as plain numbers a panel can show: when to
+//! dim, when to switch the screens off (and whether to lock then), and when to sleep, each 0 for
+//! never. `[[timeout]]` entries are still there for anything else -- a command at a time of its
+//! own -- and run under both profiles.
 //!
 //! ## Timeouts are not stages
 //!
@@ -64,7 +83,13 @@ const SUSPICIOUS_LOCK_SECS: u64 = 30;
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// What to do, and how long to wait before doing it.
+    /// On mains power, and on desktops; see the module comment.
+    #[serde(default)]
+    pub plugged_in: Profile,
+    /// On battery. Absent means the plugged-in profile applies on battery too.
+    #[serde(default)]
+    pub on_battery: Option<Profile>,
+    /// What to do, and how long to wait before doing it, beyond the profile's.
     #[serde(default, rename = "timeout")]
     pub timeouts: Vec<Timeout>,
     #[serde(default)]
@@ -94,6 +119,12 @@ pub struct Timeout {
     /// Start `[lock] command`, unless it is already running.
     #[serde(default)]
     pub lock: bool,
+    /// Fade the screens to dark, and on a laptop lower the backlight; undone on the next input.
+    #[serde(default)]
+    pub dim: bool,
+    /// Suspend the machine. `[before_sleep]` runs first, so it locks.
+    #[serde(default)]
+    pub suspend: bool,
     /// Run through `sh -c`, so a config can use quoting and pipes the way swayidle's did.
     #[serde(default)]
     pub command: Option<String>,
@@ -105,7 +136,81 @@ pub struct Timeout {
 impl Timeout {
     /// Whether this timeout would actually do anything.
     fn does_something(&self) -> bool {
-        self.blank || self.lock || self.command.is_some()
+        self.blank || self.lock || self.dim || self.suspend || self.command.is_some()
+    }
+}
+
+/// The four things everybody sets about going idle, for one power source. Each `0` is never.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    #[serde(default)]
+    pub dim_after_secs: u64,
+    /// Switch every monitor off.
+    #[serde(default)]
+    pub screen_off_after_secs: u64,
+    /// Lock as the screens go off. On unless turned off.
+    #[serde(default = "enabled")]
+    pub lock: bool,
+    #[serde(default)]
+    pub suspend_after_secs: u64,
+}
+
+impl Default for Profile {
+    fn default() -> Self {
+        Self {
+            dim_after_secs: 0,
+            screen_off_after_secs: 0,
+            lock: true,
+            suspend_after_secs: 0,
+        }
+    }
+}
+
+impl Profile {
+    /// The countdowns this profile makes.
+    ///
+    /// A dim that would come at or after the screens go off, or the machine sleeps, is left out:
+    /// there would be nothing left to see it on.
+    fn timeouts(&self) -> Vec<Timeout> {
+        let mut out = Vec::new();
+        let later = [self.screen_off_after_secs, self.suspend_after_secs]
+            .into_iter()
+            .filter(|secs| *secs > 0)
+            .min();
+        if self.dim_after_secs > 0 && later.is_none_or(|later| self.dim_after_secs < later) {
+            out.push(Timeout {
+                after_secs: self.dim_after_secs,
+                dim: true,
+                ..Timeout::default()
+            });
+        }
+        if self.screen_off_after_secs > 0 {
+            out.push(Timeout {
+                after_secs: self.screen_off_after_secs,
+                blank: true,
+                lock: self.lock,
+                ..Timeout::default()
+            });
+        }
+        if self.suspend_after_secs > 0 {
+            out.push(Timeout {
+                after_secs: self.suspend_after_secs,
+                suspend: true,
+                ..Timeout::default()
+            });
+        }
+        out
+    }
+
+    fn clamp(&mut self) {
+        for secs in [
+            &mut self.dim_after_secs,
+            &mut self.screen_off_after_secs,
+            &mut self.suspend_after_secs,
+        ] {
+            *secs = (*secs).min(MAX_TIMEOUT_SECS);
+        }
     }
 }
 
@@ -355,6 +460,11 @@ impl Config {
             }
         }
 
+        self.plugged_in.clamp();
+        if let Some(profile) = &mut self.on_battery {
+            profile.clamp();
+        }
+
         // Ascending, which is what lets the resume actions be unwound deepest-first without
         // sorting again at the moment the user is waiting for the screen to come back.
         self.timeouts.sort_by_key(|timeout| timeout.after_secs);
@@ -382,21 +492,50 @@ impl Config {
         self.gamepad.min_interval_ms = self.gamepad.min_interval_ms.min(60_000);
     }
 
-    /// A one-line account of what this config does, for the log after a load or a reload.
-    pub fn summary(&self) -> String {
-        if self.timeouts.is_empty() {
-            return "no timeouts configured; nothing will happen on idle".to_string();
+    /// The profile for the power source, plugged in unless `on_battery` and there is one.
+    pub fn profile(&self, on_battery: bool) -> &Profile {
+        match (&self.on_battery, on_battery) {
+            (Some(profile), true) => profile,
+            _ => &self.plugged_in,
         }
-        let steps: Vec<String> = self
-            .timeouts
+    }
+
+    /// Every countdown in force on this power source: the profile's and the `[[timeout]]`s,
+    /// soonest first.
+    pub fn steps(&self, on_battery: bool) -> Vec<Timeout> {
+        let mut steps = self.profile(on_battery).timeouts();
+        steps.extend(self.timeouts.iter().cloned());
+        steps.sort_by_key(|timeout| timeout.after_secs);
+        steps
+    }
+
+    /// A one-line account of what is in force, for the log after a load, a reload or a change of
+    /// power source.
+    pub fn summary(&self, on_battery: bool) -> String {
+        let steps = self.steps(on_battery);
+        let source = if on_battery {
+            "on battery"
+        } else {
+            "plugged in"
+        };
+        if steps.is_empty() {
+            return format!("{source}: no timeouts; nothing will happen on idle");
+        }
+        let steps: Vec<String> = steps
             .iter()
             .map(|timeout| {
                 let mut what = Vec::new();
+                if timeout.dim {
+                    what.push("dim");
+                }
                 if timeout.blank {
                     what.push("blank");
                 }
                 if timeout.lock {
                     what.push("lock");
+                }
+                if timeout.suspend {
+                    what.push("suspend");
                 }
                 if timeout.command.is_some() {
                     what.push("command");
@@ -404,7 +543,7 @@ impl Config {
                 format!("{}s: {}", timeout.after_secs, what.join("+"))
             })
             .collect();
-        steps.join(", ")
+        format!("{source}: {}", steps.join(", "))
     }
 }
 
@@ -702,6 +841,55 @@ mod tests {
              \n\
              [[timeout]]\nafter_secs = 900\nlock = true\nblank = true\n",
         );
-        assert_eq!(config.summary(), "600s: command, 900s: blank+lock");
+        assert_eq!(
+            config.summary(false),
+            "plugged in: 600s: command, 900s: blank+lock"
+        );
+    }
+
+    #[test]
+    fn the_two_profiles_the_way_a_laptop_wants_them() {
+        let config = parse(
+            "[plugged_in]\ndim_after_secs = 600\nscreen_off_after_secs = 900\n\
+             [on_battery]\ndim_after_secs = 180\nscreen_off_after_secs = 300\n\
+             suspend_after_secs = 600\n",
+        );
+        assert_eq!(
+            config.summary(false),
+            "plugged in: 600s: dim, 900s: blank+lock"
+        );
+        assert_eq!(
+            config.summary(true),
+            "on battery: 180s: dim, 300s: blank+lock, 600s: suspend"
+        );
+    }
+
+    #[test]
+    fn without_a_battery_profile_plugged_in_applies_on_battery() {
+        let config = parse("[plugged_in]\nscreen_off_after_secs = 900\nlock = false\n");
+        assert_eq!(config.summary(true), "on battery: 900s: blank");
+        assert_eq!(
+            parse("").summary(true),
+            "on battery: no timeouts; nothing will happen on idle"
+        );
+    }
+
+    #[test]
+    fn a_dim_after_the_screen_goes_off_is_left_out() {
+        let config = parse("[plugged_in]\ndim_after_secs = 900\nscreen_off_after_secs = 600\n");
+        assert_eq!(config.summary(false), "plugged in: 600s: blank+lock");
+    }
+
+    #[test]
+    fn timeouts_run_under_both_profiles() {
+        let config = parse(
+            "[on_battery]\nsuspend_after_secs = 600\n\
+             [[timeout]]\nafter_secs = 60\ncommand = \"x\"\n",
+        );
+        assert_eq!(
+            config.summary(true),
+            "on battery: 60s: command, 600s: suspend"
+        );
+        assert_eq!(config.summary(false), "plugged in: 60s: command");
     }
 }

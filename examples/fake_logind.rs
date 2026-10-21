@@ -11,7 +11,9 @@
 //! DBUS_SYSTEM_BUS_ADDRESS=<address> wlrix-idle
 //! ```
 //!
-//! Then type lines on its standard input: `close`, `open`, `docked on|off`, `ac on|off`.
+//! Then type lines on its standard input: `close`, `open`, `docked on|off`, `ac on|off`, and
+//! `battery on|off` -- UPower's `OnBattery`, which picks the idle profile; this takes
+//! `org.freedesktop.UPower` too, serving that one property.
 //!
 //! What it serves is what `wlrix-idle` uses: `Inhibit` (answered with one end of a pipe, whose
 //! closing it reports), `Suspend` -- which runs the delay-inhibitor dance, `PrepareForSleep(true)`,
@@ -35,6 +37,19 @@ struct State {
     lid_closed: bool,
     docked: bool,
     external_power: bool,
+    on_battery: bool,
+}
+
+struct UPower {
+    state: Arc<Mutex<State>>,
+}
+
+#[zbus::interface(name = "org.freedesktop.UPower")]
+impl UPower {
+    #[zbus(property)]
+    fn on_battery(&self) -> bool {
+        self.state.lock().unwrap().on_battery
+    }
 }
 
 struct Manager {
@@ -138,6 +153,15 @@ fn main() -> zbus::Result<()> {
         )?
         .build()?;
     *slot.lock().unwrap() = Some(connection.clone());
+    let _upower = zbus::blocking::connection::Builder::system()?
+        .name("org.freedesktop.UPower")?
+        .serve_at(
+            "/org/freedesktop/UPower",
+            UPower {
+                state: state.clone(),
+            },
+        )?
+        .build()?;
     eprintln!("fake_logind: ready");
 
     for line in std::io::stdin().lock().lines() {
@@ -149,6 +173,21 @@ fn main() -> zbus::Result<()> {
             ["open"] => fake.lid_closed = false,
             ["docked", on] => fake.docked = *on == "on",
             ["ac", on] => fake.external_power = *on == "on",
+            ["battery", on] => {
+                fake.on_battery = *on == "on";
+                drop(fake);
+                eprintln!("fake_logind: {line}");
+                let none: HashMap<&str, Value> = HashMap::new();
+                let invalidated: Vec<&str> = Vec::new();
+                _upower.emit_signal(
+                    None::<&str>,
+                    "/org/freedesktop/UPower",
+                    "org.freedesktop.DBus.Properties",
+                    "PropertiesChanged",
+                    &("org.freedesktop.UPower", none, invalidated),
+                )?;
+                continue;
+            }
             [] => continue,
             _ => {
                 eprintln!("fake_logind: did not understand {line:?}");

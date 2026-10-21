@@ -6,11 +6,12 @@
 //! the main loop through a `calloop::channel`. That is the same shape `wlrix-greeter` uses for
 //! greetd, and it means no async runtime ever touches the state machine.
 //!
-//! Three threads. One owns the session bus and serves the inhibit interfaces; one owns a system
+//! Four threads. One owns the session bus and serves the inhibit interfaces; one owns a system
 //! bus connection and holds logind's delay inhibitor; the third holds logind's lid inhibitor
 //! and watches the lid ([`lid`]). They are separate because their lifetimes are: the session one
 //! parks on a signal iterator for the life of the process, the sleep one spends most of its
-//! time blocked waiting for a suspend that may never come, and the lid one waits on a lid.
+//! time blocked waiting for a suspend that may never come, and the lid one waits on a lid. A
+//! fourth watches UPower for the power source, which picks the profile ([`upower`]).
 //!
 //! ## A name already taken is not a failure
 //!
@@ -25,6 +26,7 @@ mod lid;
 mod logind;
 mod power;
 mod screensaver;
+mod upower;
 
 use std::sync::{
     Arc, Mutex,
@@ -62,6 +64,8 @@ pub enum Event {
     },
     /// logind would not suspend or hibernate when asked.
     SleepRefused { why: String },
+    /// Whether the machine is running on its battery: which profile applies.
+    OnBattery(bool),
     /// A name we wanted belongs to someone else.
     NameUnavailable { name: String, owner: String },
 }
@@ -153,19 +157,13 @@ impl Handle {
     }
 }
 
-/// Start whichever bus threads the config asks for.
-///
-/// `None` when there is nothing to do -- no interfaces wanted and nothing to run before sleep --
-/// in which case the main loop never learns about D-Bus at all.
+/// Start whichever bus threads the config asks for -- always at least the power-source watch.
 pub fn spawn(config: &Config, replace: bool) -> Option<(Handle, calloop::channel::Channel<Event>)> {
     let wants_session = config.dbus.screensaver || config.dbus.power_management;
     let wants_logind = config.dbus.logind && config.before_sleep.does_something();
     // The lid is taken whenever logind may be talked to: its defaults are logind's own, so
     // holding it changes nothing until the person changes `[lid]`.
     let wants_lid = config.dbus.logind;
-    if !wants_session && !wants_logind && !wants_lid {
-        return None;
-    }
 
     let (sender, channel) = calloop::channel::channel();
     let (ack_sender, ack_receiver) = mpsc::channel();
@@ -194,6 +192,17 @@ pub fn spawn(config: &Config, replace: bool) -> Option<(Handle, calloop::channel
             .name("wlrix-idle-logind".to_string())
             .spawn(move || logind::run(sender, ack_receiver, timeout))
             .map_err(|err| warn!("could not start the logind thread: {err}"))
+            .ok();
+    }
+
+    // Always: which profile applies is not something a config turns off, and on a desktop it is
+    // one read that says "plugged in".
+    {
+        let sender = sender.clone();
+        std::thread::Builder::new()
+            .name("wlrix-idle-upower".to_string())
+            .spawn(move || upower::run(sender))
+            .map_err(|err| warn!("could not start the UPower thread: {err}"))
             .ok();
     }
 
