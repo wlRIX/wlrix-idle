@@ -16,6 +16,9 @@ replaces the `swayidle` + `wlopm` pairing, and does three things neither of them
   and therefore `ext-idle-notify` — never sees a stick move. This reads controllers directly and puts that input back.
 - **Locks before suspend.** Takes a logind delay inhibitor, so the locker has actually finished before the machine
   sleeps. On by default, with `wlrix-lock`: a laptop must never wake to an unlocked desktop.
+- **Saves the session before a shutdown.** Takes a logind *shutdown* delay inhibitor and, when a shutdown starts, sends
+  the compositor `SIGUSR1` and waits (up to three seconds) for `session.toml`. A shutdown signals every process at once,
+  so without this the windows of a quick-to-quit application could be gone before the compositor saved them.
 - **Decides what the lid does.** Takes logind's `handle-lid-switch` inhibitor and acts on `[lid]` instead -- per user,
   without editing `/etc/systemd/logind.conf` -- with separate actions on battery, plugged in, and docked.
 
@@ -92,7 +95,7 @@ devices = []          # explicit paths, bypassing detection entirely
 [dbus]
 screensaver = true       # own org.freedesktop.ScreenSaver
 power_management = true  # own org.freedesktop.PowerManagement.Inhibit
-logind = true            # take the before-sleep delay inhibitor and the lid
+logind = true            # take the before-sleep and shutdown delay inhibitors, and the lid
 replace = false          # take the bus names from whoever already holds them
 ```
 

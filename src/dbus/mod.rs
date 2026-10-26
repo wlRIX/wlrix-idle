@@ -26,6 +26,7 @@ mod lid;
 mod logind;
 mod power;
 mod screensaver;
+mod shutdown;
 mod upower;
 
 use std::sync::{
@@ -203,6 +204,17 @@ pub fn spawn(config: &Config, replace: bool) -> Option<(Handle, calloop::channel
             .name("wlrix-idle-upower".to_string())
             .spawn(move || upower::run(sender))
             .map_err(|err| warn!("could not start the UPower thread: {err}"))
+            .ok();
+    }
+
+    // Whenever logind may be talked to, like the lid: saving the session before a shutdown is
+    // the compositor's setting, not this daemon's, and costs nothing when there is nothing to
+    // save. See `shutdown`.
+    if config.dbus.logind {
+        std::thread::Builder::new()
+            .name("wlrix-idle-shutdown".to_string())
+            .spawn(shutdown::run)
+            .map_err(|err| warn!("could not start the shutdown thread: {err}"))
             .ok();
     }
 
