@@ -1,6 +1,6 @@
 [package]
 name = "wlrix-idle"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "wlRIX idle manager — blanks, locks and suspends the session on a timeout, and notices controllers."

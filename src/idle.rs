@@ -116,8 +116,16 @@ impl Idle {
         &self.loop_handle
     }
 
-    /// Rebuild the step list from the config. Leaves the notifications alone; the caller arms.
+    /// Rebuild the step list from the config. The caller arms.
+    ///
+    /// The old steps' notifications are destroyed first. Dropping a proxy does not destroy the
+    /// object on the compositor's side, so without this the old countdowns would keep running
+    /// there -- and since a notification's user data is its index in `steps`, they would fire
+    /// against whatever step now sits at that index: the battery profile's 180-second dim would
+    /// go on dimming the screen after the machine was plugged back in, logged as the plugged-in
+    /// profile's timeout.
     fn rebuild_steps(&mut self) {
+        self.disarm_all();
         self.steps = self
             .config
             .steps(self.on_battery)
